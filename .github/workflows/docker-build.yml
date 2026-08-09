@@ -39,10 +39,17 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Extract Project Source
+      - name: Extract Project Source and Strip Root Directory
         shell: pwsh
         run: |
-          Expand-Archive -Path "Overlord-main3.zip" -DestinationPath "." -Force
+          Expand-Archive -Path "Overlord-main3.zip" -DestinationPath "temp_extract" -Force
+          $items = Get-ChildItem -Path "temp_extract"
+          if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
+              Move-Item -Path "temp_extract\$($items[0].Name)\*" -Destination "." -Force
+          } else {
+              Move-Item -Path "temp_extract\*" -Destination "." -Force
+          }
+          Remove-Item -Path "temp_extract" -Recurse -Force
           Remove-Item -Path "Overlord-main3.zip" -Force
 
       - name: Build BackstageInjection DLL with MSVC
@@ -81,11 +88,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
-      - name: Extract Project Source
+      - name: Extract Project Source and Strip Root Directory
         shell: bash
         run: |
-          unzip -q Overlord-main3.zip -d .
-          rm Overlord-main3.zip
+          unzip -q Overlord-main3.zip -d temp_extract
+          ROOT_CONTENT=$(ls -A temp_extract)
+          if [ $(echo "$ROOT_CONTENT" | wc -w) -eq 1 ] && [ -d "temp_extract/$ROOT_CONTENT" ]; then
+            shopt -s dotglob
+            mv temp_extract/"$ROOT_CONTENT"/* .
+            shopt -u dotglob
+          else
+            shopt -s dotglob
+            mv temp_extract/* .
+            shopt -u dotglob
+          fi
+          rm -rf temp_extract Overlord-main3.zip
 
       - name: Download backstage DLLs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
