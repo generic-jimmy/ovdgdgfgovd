@@ -44,11 +44,8 @@ jobs:
         run: |
           Expand-Archive -Path "Overlord-main3.zip" -DestinationPath "temp_extract" -Force
           $items = Get-ChildItem -Path "temp_extract"
-          if ($items.Count -eq 1 -and $items[0].PSIsContainer) {
-              Move-Item -Path "temp_extract\$($items[0].Name)\*" -Destination "." -Force
-          } else {
-              Move-Item -Path "temp_extract\*" -Destination "." -Force
-          }
+          $srcPath = if ($items.Count -eq 1 -and $items[0].PSIsContainer) { "temp_extract\$($items[0].Name)" } else { "temp_extract" }
+          Copy-Item -Path "$srcPath\*" -Destination "." -Recurse -Force
           Remove-Item -Path "temp_extract" -Recurse -Force
           Remove-Item -Path "Overlord-main3.zip" -Force
 
@@ -94,13 +91,9 @@ jobs:
           unzip -q Overlord-main3.zip -d temp_extract
           ROOT_CONTENT=$(ls -A temp_extract)
           if [ $(echo "$ROOT_CONTENT" | wc -w) -eq 1 ] && [ -d "temp_extract/$ROOT_CONTENT" ]; then
-            shopt -s dotglob
-            mv temp_extract/"$ROOT_CONTENT"/* .
-            shopt -u dotglob
+            cp -a temp_extract/"$ROOT_CONTENT"/. .
           else
-            shopt -s dotglob
-            mv temp_extract/* .
-            shopt -u dotglob
+            cp -a temp_extract/. .
           fi
           rm -rf temp_extract Overlord-main3.zip
 
