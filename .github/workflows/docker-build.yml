@@ -37,15 +37,15 @@ jobs:
           }
 
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@v4
 
       - name: Extract Project Source and Strip Root Directory
         shell: pwsh
         run: |
           Expand-Archive -Path "Overlord-main3.zip" -DestinationPath "temp_extract" -Force
-          $items = Get-ChildItem -Path "temp_extract"
-          $srcPath = if ($items.Count -eq 1 -and $items[0].PSIsContainer) { "temp_extract\$($items[0].Name)" } else { "temp_extract" }
-          Copy-Item -Path "$srcPath\*" -Destination "." -Recurse -Force
+          $items = Get-ChildItem -Path "temp_extract" -Force
+          $srcPath = if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $items[0].FullName } else { "temp_extract" }
+          Get-ChildItem -Path $srcPath -Force | Copy-Item -Destination "." -Recurse -Force
           Remove-Item -Path "temp_extract" -Recurse -Force
           Remove-Item -Path "Overlord-main3.zip" -Force
 
@@ -54,7 +54,7 @@ jobs:
         run: call scripts\build-backstage-dll.bat
 
       - name: Upload backstage DLLs
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
           name: backstage-dll
           path: |
@@ -83,22 +83,24 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        uses: actions/checkout@v4
 
       - name: Extract Project Source and Strip Root Directory
         shell: bash
         run: |
           unzip -q Overlord-main3.zip -d temp_extract
-          ROOT_CONTENT=$(ls -A temp_extract)
-          if [ $(echo "$ROOT_CONTENT" | wc -w) -eq 1 ] && [ -d "temp_extract/$ROOT_CONTENT" ]; then
-            cp -a temp_extract/"$ROOT_CONTENT"/. .
+          shopt -s dotglob
+          items=(temp_extract/*)
+          if [ ${#items[@]} -eq 1 ] && [ -d "${items[0]}" ]; then
+            cp -a "${items[0]}"/. .
           else
             cp -a temp_extract/. .
           fi
+          shopt -u dotglob
           rm -rf temp_extract Overlord-main3.zip
 
       - name: Download backstage DLLs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@v4
         with:
           name: backstage-dll
           path: Overlord-Server/dist-clients
@@ -111,9 +113,9 @@ jobs:
 
           client_version=$(grep -oP 'var\s+AgentVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' Overlord-Client/cmd/agent/config/config.go)
           server_version=$(grep -oP 'export\s+const\s+SERVER_VERSION\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' Overlord-Server/src/version.ts)
-          package_version=$(node -p "require('./Overlord-Server/package.json').version")
+          package_version=$(jq -r '.version' Overlord-Server/package.json)
 
-          if [[ -z "$client_version" || -z "$server_version" || -z "$package_version" ]]; then
+          if [[ -z "$client_version" || -z "$server_version" || -z "$package_version" || "$package_version" == "null" ]]; then
             echo "Failed to parse one or more version values from source files" >&2
             exit 1
           fi
@@ -154,10 +156,10 @@ jobs:
         run: printf 'IMAGE_NAME=%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -165,7 +167,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -176,7 +178,7 @@ jobs:
 
       - name: Build and push server image
         id: build
-        uses: docker/build-push-action@ca052bb54ab0790a636c9b5f226502c73d547a25 # v5
+        uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile
@@ -196,7 +198,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload image digest
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@v4
         with:
           name: image-digest-${{ matrix.artifact }}
           path: /tmp/digests/*
@@ -217,17 +219,17 @@ jobs:
         run: printf 'IMAGE_NAME=%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       - name: Download image digests
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@v4
         with:
           pattern: image-digest-*
           path: /tmp/digests
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+        uses: docker/setup-buildx-action@v3
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        uses: docker/login-action@v3
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -235,7 +237,7 @@ jobs:
 
       - name: Extract release tags
         id: meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
