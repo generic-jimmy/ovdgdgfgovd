@@ -12,6 +12,13 @@ env:
   REGISTRY: ghcr.io
   RELEASE_VERSION: ${{ inputs.release_version }}
 
+# Prevents two releases from racing each other and clobbering the floating
+# `latest` / major / major.minor tags. Runs are queued, not cancelled, so a
+# half-finished GHCR push is never abandoned mid-way.
+concurrency:
+  group: overlord-release
+  cancel-in-progress: false
+
 permissions:
   contents: read
 
@@ -26,6 +33,7 @@ jobs:
   build-backstage-dll:
     needs: approve-release
     runs-on: windows-latest
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -35,26 +43,58 @@ jobs:
           if ($env:RELEASE_VERSION -notmatch '^\d+\.\d+\.\d+$') {
             throw "Release version must be strict semver like 1.2.3; got '$env:RELEASE_VERSION'"
           }
-
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      # 1. Base Source File Cache (Windows)
+      # Keyed on a hash of the source zip (not just the version string) so a
+      # re-run that finds a different/mismatched zip under the same release
+      # version can never silently reuse stale cached source.
+      - name: Cache Extracted Project Source
+        id: cache-source-win
+        uses: actions/cache@v5
+        with:
+          path: |
+            Overlord-Server
+            Overlord-Client
+            scripts
+          key: ${{ runner.os }}-source-${{ env.RELEASE_VERSION }}-${{ hashFiles('Overlord-main3.zip') }}
 
       - name: Extract Project Source and Strip Root Directory
+        if: steps.cache-source-win.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           Expand-Archive -Path "Overlord-main3.zip" -DestinationPath "temp_extract" -Force
           $items = Get-ChildItem -Path "temp_extract" -Force
-          $srcPath = if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $items[0].FullName } else { "temp_extract" }
+          $srcPath = if ($items.Count -eq 1 -and $items.PSIsContainer) { $items.FullName } else { "temp_extract" }
           Get-ChildItem -Path $srcPath -Force | Copy-Item -Destination "." -Recurse -Force
           Remove-Item -Path "temp_extract" -Recurse -Force
           Remove-Item -Path "Overlord-main3.zip" -Force
+
+      # 2. Node Dependencies Cache (Windows Backend)
+      # Must run AFTER extraction: hashFiles() below reads the lockfiles on
+      # disk, and on a fresh run (cache-source miss) they don't exist until
+      # the extraction step above creates them. Running this first (the
+      # original order) meant hashFiles() always saw nothing, so the key
+      # collapsed to the same value on every run regardless of what the
+      # lockfiles actually contained.
+      - name: Cache Node Modules (Windows)
+        uses: actions/cache@v5
+        with:
+          path: |
+            Overlord-Server/node_modules
+            Overlord-Client/node_modules
+          key: ${{ runner.os }}-node-modules-${{ hashFiles('Overlord-Server/package-lock.json', 'Overlord-Client/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-modules-
 
       - name: Build BackstageInjection DLL with MSVC
         shell: cmd
         run: call scripts\build-backstage-dll.bat
 
       - name: Upload backstage DLLs
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: backstage-dll
           path: |
@@ -74,33 +114,63 @@ jobs:
           - platform: linux/amd64
             runner: ubuntu-latest
             artifact: amd64
+          # NOTE: ubuntu-24.04-arm is GitHub's free hosted arm64 runner, and
+          # it is ONLY available on public repositories - on a private repo
+          # this job will fail to schedule at all ("no runner matching...").
+          # If this repo is private, either point this at a self-hosted /
+          # org "larger runner" arm64 label instead, or drop native arm64
+          # entirely and cross-build linux/arm64 via QEMU
+          # (docker/setup-qemu-action) from the amd64 runner.
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
             artifact: arm64
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
+
+      # 1. Base Source File Cache (Linux Matrix)
+      - name: Cache Extracted Project Source
+        id: cache-source-linux
+        uses: actions/cache@v5
+        with:
+          path: |
+            Overlord-Server
+            Overlord-Client
+            scripts
+          key: ${{ runner.os }}-${{ matrix.artifact }}-source-${{ env.RELEASE_VERSION }}-${{ hashFiles('Overlord-main3.zip') }}
 
       - name: Extract Project Source and Strip Root Directory
+        if: steps.cache-source-linux.outputs.cache-hit != 'true'
         shell: bash
         run: |
+          set -euo pipefail
           unzip -q Overlord-main3.zip -d temp_extract
           shopt -s dotglob
           items=(temp_extract/*)
-          if [ ${#items[@]} -eq 1 ] && [ -d "${items[0]}" ]; then
-            cp -a "${items[0]}"/. .
+          if [ ${#items[@]} -eq 1 ] && [ -d "${items}" ]; then
+            cp -a "${items}"/. .
           else
             cp -a temp_extract/. .
           fi
           shopt -u dotglob
           rm -rf temp_extract Overlord-main3.zip
 
+      # 2. Node Dependencies Cache (Linux Backend)
+      - name: Cache Node Modules (Linux)
+        uses: actions/cache@v5
+        with:
+          path: |
+            Overlord-Server/node_modules
+            Overlord-Client/node_modules
+          key: ${{ runner.os }}-${{ matrix.artifact }}-node-modules-${{ hashFiles('Overlord-Server/package-lock.json', 'Overlord-Client/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.artifact }}-node-modules-
+
       - name: Download backstage DLLs
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: backstage-dll
           path: Overlord-Server/dist-clients
@@ -110,16 +180,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
           client_version=$(grep -oP 'var\s+AgentVersion\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' Overlord-Client/cmd/agent/config/config.go)
           server_version=$(grep -oP 'export\s+const\s+SERVER_VERSION\s*=\s*"\K[0-9]+\.[0-9]+\.[0-9]+' Overlord-Server/src/version.ts)
           package_version=$(jq -r '.version' Overlord-Server/package.json)
-
           if [[ -z "$client_version" || -z "$server_version" || -z "$package_version" || "$package_version" == "null" ]]; then
             echo "Failed to parse one or more version values from source files" >&2
             exit 1
           fi
-
           if ! { [[ "$client_version" == "$server_version" ]] && [[ "$client_version" == "$package_version" ]]; }; then
             echo "Version mismatch detected:" >&2
             echo "  client(config.go): $client_version" >&2
@@ -127,11 +194,9 @@ jobs:
             echo "  package(package.json): $package_version" >&2
             exit 1
           fi
-
           major="${client_version%%.*}"
           rest="${client_version#*.}"
           minor="${rest%%.*}"
-
           {
             echo "version=$client_version"
             echo "major=$major"
@@ -156,10 +221,10 @@ jobs:
         run: printf 'IMAGE_NAME=%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -167,7 +232,7 @@ jobs:
 
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -178,7 +243,7 @@ jobs:
 
       - name: Build and push server image
         id: build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
@@ -198,7 +263,7 @@ jobs:
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload image digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: image-digest-${{ matrix.artifact }}
           path: /tmp/digests/*
@@ -213,23 +278,22 @@ jobs:
     permissions:
       contents: read
       packages: write
-
     steps:
       - name: Normalize image name
         run: printf 'IMAGE_NAME=%s\n' "${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
 
       - name: Download image digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: image-digest-*
           path: /tmp/digests
           merge-multiple: true
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -237,7 +301,7 @@ jobs:
 
       - name: Extract release tags
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
@@ -248,16 +312,13 @@ jobs:
 
       - name: Create and push multi-architecture manifest
         working-directory: /tmp/digests
-        shell: bash
         run: |
           set -euo pipefail
-          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 2
-          mapfile -t tag_args < <(jq -r '.tags[] | "-t", .' <<< "$DOCKER_METADATA_OUTPUT_JSON")
-          digest_args=()
-          for digest_file in *; do
-            digest_args+=("${REGISTRY}/${IMAGE_NAME}@sha256:${digest_file}")
-          done
-          docker buildx imagetools create "${tag_args[@]}" "${digest_args[@]}"
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}@sha256:%s ' *)
 
-      - name: Verify published manifest
-        run: docker buildx imagetools inspect "${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${RELEASE_VERSION}"
+      - name: Inspect published manifest
+        run: |
+          set -euo pipefail
+          docker buildx imagetools inspect ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.meta.outputs.version }}
