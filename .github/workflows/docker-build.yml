@@ -51,6 +51,7 @@ jobs:
           path: |
             Overlord-Server
             Overlord-Client
+            BackstageInjection-Rust
             scripts
           key: ${{ runner.os }}-source-${{ env.RELEASE_VERSION }}-${{ hashFiles('Overlord-main3.zip') }}
 
@@ -65,6 +66,19 @@ jobs:
           Get-ChildItem -Path $srcPath -Force | Copy-Item -Destination "." -Recurse -Force
           Remove-Item -Path "temp_extract" -Recurse -Force
           Remove-Item -Path "Overlord-main3.zip" -Force
+
+      - name: Verify BackstageInjection-Rust exists
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cargoPath = "BackstageInjection-Rust\Cargo.toml"
+          if (-not (Test-Path $cargoPath)) {
+            Write-Host "##[error] Cargo.toml not found at expected path: $cargoPath"
+            Write-Host "Listing workspace root to diagnose:"
+            Get-ChildItem -Path "." -Force | Select-Object Name, PSIsContainer | Format-Table -AutoSize
+            exit 1
+          }
+          Write-Host "Cargo.toml found at $cargoPath — proceeding."
 
       - name: Cache Node Modules (Windows)
         uses: actions/cache@v5
