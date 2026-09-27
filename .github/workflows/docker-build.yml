@@ -11,6 +11,7 @@ on:
 env:
   REGISTRY: ghcr.io
   RELEASE_VERSION: ${{ inputs.release_version }}
+  NODE_VERSION: '26.10.0'
 
 concurrency:
   group: overlord-release
@@ -44,6 +45,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Cache Extracted Project Source
         id: cache-source-win
         uses: actions/cache@v5
@@ -55,12 +61,37 @@ jobs:
             scripts
           key: ${{ runner.os }}-source-${{ env.RELEASE_VERSION }}-${{ hashFiles('Overlord-main3.zip') }}
 
+      # NOTE: Expand-Archive uses .NET's ZipFile class, which only understands
+      # Store/Deflate compression. Zips built with LZMA (e.g. 7-Zip's default
+      # "Ultra" preset, or `7z a -mm=LZMA`) fail with:
+      #   "The archive entry was compressed using LZMA and is not supported."
+      # 7z.exe ships preinstalled on windows-latest and handles LZMA natively,
+      # so we shell out to it instead of relying on Expand-Archive.
       - name: Extract Project Source and Strip Root Directory
         if: steps.cache-source-win.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Expand-Archive -Path "Overlord-main3.zip" -DestinationPath "temp_extract" -Force
+
+          $sevenZip = Get-Command '7z.exe' -ErrorAction SilentlyContinue
+          if (-not $sevenZip) {
+            $candidate = Join-Path $env:ProgramFiles '7-Zip\7z.exe'
+            if (Test-Path $candidate) {
+              $sevenZip = $candidate
+            } else {
+              throw "7z.exe not found on PATH or in Program Files; cannot extract LZMA-compressed archive."
+            }
+          } else {
+            $sevenZip = $sevenZip.Source
+          }
+
+          New-Item -ItemType Directory -Path "temp_extract" -Force | Out-Null
+
+          & $sevenZip x "Overlord-main3.zip" "-otemp_extract" -y | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "7z extraction failed with exit code $LASTEXITCODE"
+          }
+
           $items = Get-ChildItem -Path "temp_extract" -Force
           $srcPath = if ($items.Count -eq 1 -and $items[0].PSIsContainer) { $items[0].FullName } else { "temp_extract" }
           Get-ChildItem -Path $srcPath -Force | Copy-Item -Destination "." -Recurse -Force
@@ -126,6 +157,11 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
+      - name: Set up Node.js
+        uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
       - name: Cache Extracted Project Source
         id: cache-source-linux
         uses: actions/cache@v5
@@ -136,6 +172,9 @@ jobs:
             scripts
           key: ${{ runner.os }}-${{ matrix.artifact }}-source-${{ env.RELEASE_VERSION }}-${{ hashFiles('Overlord-main3.zip') }}
 
+      # unzip on Linux (via libarchive/InfoZIP depending on distro image) handles
+      # LZMA-method zip entries correctly, unlike PowerShell's Expand-Archive on
+      # Windows, so no special-casing is needed here.
       - name: Extract Project Source and Strip Root Directory
         if: steps.cache-source-linux.outputs.cache-hit != 'true'
         shell: bash
@@ -242,6 +281,8 @@ jobs:
           file: ./Dockerfile
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            NODE_VERSION=${{ env.NODE_VERSION }}
           cache-from: type=gha,scope=server-${{ matrix.artifact }}
           cache-to: type=gha,mode=max,scope=server-${{ matrix.artifact }}
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }},push-by-digest=true,name-canonical=true,push=true
