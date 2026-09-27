@@ -172,15 +172,25 @@ jobs:
             scripts
           key: ${{ runner.os }}-${{ matrix.artifact }}-source-${{ env.RELEASE_VERSION }}-${{ hashFiles('Overlord-main3.zip') }}
 
-      # unzip on Linux (via libarchive/InfoZIP depending on distro image) handles
-      # LZMA-method zip entries correctly, unlike PowerShell's Expand-Archive on
-      # Windows, so no special-casing is needed here.
+      # Info-ZIP's `unzip` (like PowerShell's Expand-Archive) does NOT support
+      # the LZMA compression method — it fails with exit code 81 ("testing or
+      # extraction of one or more files failed due to unsupported compression
+      # method"). p7zip's `7z` handles LZMA natively, so we use that instead,
+      # mirroring the Windows job.
       - name: Extract Project Source and Strip Root Directory
         if: steps.cache-source-linux.outputs.cache-hit != 'true'
         shell: bash
         run: |
           set -euo pipefail
-          unzip -q Overlord-main3.zip -d temp_extract
+
+          if ! command -v 7z >/dev/null 2>&1; then
+            sudo apt-get update -qq
+            sudo apt-get install -y -qq p7zip-full
+          fi
+
+          mkdir -p temp_extract
+          7z x "Overlord-main3.zip" -otemp_extract -y >/dev/null
+
           shopt -s dotglob
           items=(temp_extract/*)
           if [ ${#items[@]} -eq 1 ] && [ -d "${items[0]}" ]; then
